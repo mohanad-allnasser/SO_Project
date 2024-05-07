@@ -4,7 +4,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-void print_contents(const char *dir_name, int depth_level) {
+void print_contents(const char *dir_name, int depth_level, FILE *file) {
     DIR *dir;
     struct dirent *entry;
     struct stat statbuf;
@@ -28,16 +28,15 @@ void print_contents(const char *dir_name, int depth_level) {
             continue;
         }
 
-        
         for (int i = 0; i < depth_level; i++) { 
-            printf("|--");
+            fprintf(file, "|----");
         }
 
         if (S_ISDIR(statbuf.st_mode)) {
-            printf("%s :\n", entry->d_name);
-            print_contents(path, depth_level + 1);
+            fprintf(file, "%s :\n", entry->d_name);
+            print_contents(path, depth_level + 1, file);
         } else {
-            printf("%s\n", entry->d_name);
+            fprintf(file, "%s\n", entry->d_name);
         }
     }
 
@@ -50,7 +49,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    print_contents(argv[1], 0);
+    FILE *file = fopen("snapshot.txt", "w");
+    if (!file) {
+        perror("fopen");
+        return 1;
+    }
+
+    print_contents(argv[1], 0, file);
+
+    fclose(file);
+    printf("Snapshot of directory \"%s\" written to snapshot.txt\n", argv[1]);
 
     return 0;
 }
