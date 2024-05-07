@@ -44,21 +44,43 @@ void print_contents(const char *dir_name, int depth_level, FILE *file) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <directory_name>\n", argv[0]);
+    if ((argc < 2) || (argc > 11)) {
+        fprintf(stderr, "Usage: %s <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
         return 1;
     }
-
-    FILE *file = fopen("snapshot.txt", "w");
-    if (!file) {
-        perror("fopen");
-        return 1;
+    
+    char dir_names_list[1500];
+    for (int i=1; i<=argc; i++){
+        
+        if (argv[i] == NULL) { 
+            break;
+        }
+        
+        if (strstr(dir_names_list, argv[i]) == NULL){
+            
+            strcat(dir_names_list, argv[i]);
+            char output_name[115];
+            
+            snprintf(output_name, sizeof(output_name), "snapshot(%s).txt", argv[i]);
+            FILE *file = fopen(output_name, "w");
+            if (!file) {
+                perror("fopen");
+                return 1;
+            }
+            
+            print_contents(argv[i], 0, file);
+            fclose(file);
+            printf("Snapshot of directory \"%s\" written to \"%s\"\n", argv[i], output_name);
+            
+        } 
+        
+        else {
+            printf("The directory \"%s\" already processed\n", argv[i]);
+            continue;
+        }
+        
     }
-
-    print_contents(argv[1], 0, file);
-
-    fclose(file);
-    printf("Snapshot of directory \"%s\" written to snapshot.txt\n", argv[1]);
-
+    
+    
     return 0;
 }
