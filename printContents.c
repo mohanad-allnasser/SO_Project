@@ -45,91 +45,30 @@ void print_contents(const char *dir_name, int depth_level, FILE *file) {
     closedir(dir);
 }
 
-int compare_files(const char *file1, const char *file2) {
-    FILE *f1 = fopen(file1, "r");
-    FILE *f2 = fopen(file2, "r");
-    if (!f1 || !f2) {
-        perror("Error opening files for comparison");
-        return -1;
-    }
-
-    int c1, c2;
-    do {
-        c1 = fgetc(f1);
-        c2 = fgetc(f2);
-        if (c1 != c2) {
-            fclose(f1);
-            fclose(f2);
-            return 0; // Files are different
-        }
-    } while (c1 != EOF && c2 != EOF);
-
-    fclose(f1);
-    fclose(f2);
-
-    if (c1 == EOF && c2 == EOF) {
-        return 1; // Files are identical
-    } else {
-        return 0; // Files are different
-    }
-}
-
-void analyze_file(const char *file_path, const char *isolated_dir) {
+void analyze_file(const char *file_path, const char *isolated_dir, int pipe_fd[2]) {
     pid_t pid = fork(); // Create a child process
     if (pid < 0) {
         perror("fork");
     } else if (pid == 0) {
         // Child process to analyze the file
+        close(pipe_fd[0]); // Close the read end of the pipe
+        dup2(pipe_fd[1], STDOUT_FILENO); // Redirect stdout to the write end of the pipe
         execlp("sh", "sh", "verify_for_malicious.sh", file_path, isolated_dir, (char *)NULL);
         perror("execlp");
         exit(1);
     } else {
-        // Parent process waits for the child process to finish
-        int status;
-        waitpid(pid, &status, 0);
+        // Parent process does not write to the pipe
+        close(pipe_fd[1]); // Close the write end of the pipe
     }
-}
-
-void check_and_isolate_files(const char *dir_name, const char *isolated_dir) {
-    DIR *dir;
-    struct dirent *entry;
-    struct stat statbuf;
-    char path[2048];
-
-    dir = opendir(dir_name);
-    if (!dir) {
-        perror("opendir");
-        return;
-    }
-
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-
-        snprintf(path, 2048, "%s/%s", dir_name, entry->d_name);
-
-        if (lstat(path, &statbuf) == -1) {
-            perror("lstat");
-            continue;
-        }
-
-        if (!S_ISDIR(statbuf.st_mode) && (statbuf.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) == 0) {
-            // File has no permissions, indicating potential danger
-            analyze_file(path, isolated_dir);
-        }
-    }
-
-    closedir(dir);
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 4 || argc > 12) {
+    if (argc < 5 || argc > 12) {
         fprintf(stderr, "Usage: %s -o output_directory -s isolated_space_dir <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
         return 1;
     }
 
-    char *output_dir = NULL;
+    char *output_dir = ".";
     char *isolated_dir = NULL;
     int start_index = 1;
 
@@ -139,12 +78,19 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         output_dir = argv[2];
-        if (strcmp(argv[3], "-s") != 0) {
+        if (strcmp(argv[3], "-s") == 0) {
+            isolated_dir = argv[4];
+            start_index = 5;
+        } else {
             fprintf(stderr, "Usage: %s -o output_directory -s isolated_space_dir <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
             return 1;
         }
-        isolated_dir = argv[4];
-        start_index = 5;
+    }
+
+    int pipe_fd[2];
+    if (pipe(pipe_fd) == -1) {
+        perror("pipe");
+        return 1;
     }
 
     for (int i = start_index; i < argc; i++) {
@@ -205,22 +151,65 @@ int main(int argc, char *argv[]) {
                 printf("Snapshot of directory \"%s\" written to \"%s\"\n", argv[i], output_name);
             }
 
-            // Check and isolate potentially dangerous files
-            check_and_isolate_files(argv[i], isolated_dir);
+            // Analyze files in the directory for potential threats
+            DIR *dir = opendir(argv[i]);
+            if (!dir) {
+                perror("opendir");
+                exit(1);
+            }
+
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_REG) {
+                    char file_path[2048];
+                    snprintf(file_path, sizeof(file_path), "%s/%s", argv[i], entry->d_name);
+
+                    analyze_file(file_path, isolated_dir, pipe_fd);
+                }
+            }
+
+            closedir(dir);
 
             // Child process finished
             exit(0);
         }
     }
 
-    // Parent process waits for all child processes to finish
+    // Parent process
+    close(pipe_fd[1]); // Close the write end of the pipe
+
     int status;
     pid_t wpid;
+    char buffer[2048];
+    int corrupt_files_count = 0;
+
     while ((wpid = wait(&status)) > 0) {
         if (WIFEXITED(status)) {
             printf("The process with the ID %d finished with the code %d\n", wpid, WEXITSTATUS(status));
+            if (WEXITSTATUS(status) == 0) {
+                // Read from pipe
+                while (read(pipe_fd[0], buffer, sizeof(buffer) - 1) > 0) {
+                    buffer[sizeof(buffer) - 1] = '\0'; // Null-terminate the buffer
+                    if (strcmp(buffer, "SAFE") != 0) {
+                        // File is dangerous, move it to the isolation directory
+                        char *file_path = strtok(buffer, "\n");
+                        while (file_path != NULL) {
+                            printf("Moving dangerous file to isolation directory: %s\n", file_path);
+                            char isolate_path[2048];
+                            snprintf(isolate_path, sizeof(isolate_path), "%s/%s", isolated_dir, strrchr(file_path, '/') + 1);
+                            rename(file_path, isolate_path);
+                            corrupt_files_count++;
+                            file_path = strtok(NULL, "\n");
+                        }
+                    }
+                }
+            }
         }
     }
+
+    close(pipe_fd[0]); // Close the read end of the pipe
+
+    printf("Number of corrupt files found: %d\n", corrupt_files_count);
 
     return 0;
 }
