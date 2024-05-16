@@ -74,22 +74,77 @@ int compare_files(const char *file1, const char *file2) {
     }
 }
 
+void analyze_file(const char *file_path, const char *isolated_dir) {
+    pid_t pid = fork(); // Create a child process
+    if (pid < 0) {
+        perror("fork");
+    } else if (pid == 0) {
+        // Child process to analyze the file
+        execlp("sh", "sh", "verify_for_malicious.sh", file_path, isolated_dir, (char *)NULL);
+        perror("execlp");
+        exit(1);
+    } else {
+        // Parent process waits for the child process to finish
+        int status;
+        waitpid(pid, &status, 0);
+    }
+}
+
+void check_and_isolate_files(const char *dir_name, const char *isolated_dir) {
+    DIR *dir;
+    struct dirent *entry;
+    struct stat statbuf;
+    char path[2048];
+
+    dir = opendir(dir_name);
+    if (!dir) {
+        perror("opendir");
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        snprintf(path, 2048, "%s/%s", dir_name, entry->d_name);
+
+        if (lstat(path, &statbuf) == -1) {
+            perror("lstat");
+            continue;
+        }
+
+        if (!S_ISDIR(statbuf.st_mode) && (statbuf.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) == 0) {
+            // File has no permissions, indicating potential danger
+            analyze_file(path, isolated_dir);
+        }
+    }
+
+    closedir(dir);
+}
+
 int main(int argc, char *argv[]) {
-    if (argc < 2 || argc > 11) {
-        fprintf(stderr, "Usage: %s [-o output_directory] <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
+    if (argc < 4 || argc > 12) {
+        fprintf(stderr, "Usage: %s -o output_directory -s isolated_space_dir <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
         return 1;
     }
 
-    char *output_dir = "."; // Default to current directory
+    char *output_dir = NULL;
+    char *isolated_dir = NULL;
     int start_index = 1;
 
     if (strcmp(argv[1], "-o") == 0) {
-        if (argc < 4) {
-            fprintf(stderr, "Usage: %s [-o output_directory] <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
+        if (argc < 6) {
+            fprintf(stderr, "Usage: %s -o output_directory -s isolated_space_dir <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
             return 1;
         }
         output_dir = argv[2];
-        start_index = 3;
+        if (strcmp(argv[3], "-s") != 0) {
+            fprintf(stderr, "Usage: %s -o output_directory -s isolated_space_dir <directory_name1> [<directory_name2>...<directory_name10>]\n", argv[0]);
+            return 1;
+        }
+        isolated_dir = argv[4];
+        start_index = 5;
     }
 
     for (int i = start_index; i < argc; i++) {
@@ -149,6 +204,9 @@ int main(int argc, char *argv[]) {
                 fclose(file);
                 printf("Snapshot of directory \"%s\" written to \"%s\"\n", argv[i], output_name);
             }
+
+            // Check and isolate potentially dangerous files
+            check_and_isolate_files(argv[i], isolated_dir);
 
             // Child process finished
             exit(0);
